@@ -7,12 +7,17 @@ from app.routes.incidents import router as incidents_router
 from app.routes.ai import router as ai_router
 from app.routes.applications import router as applications_router
 
+
 app = FastAPI(
     title="AI Incident Response Agent",
     description="Real-Time AI Incident Response and Learning Agent",
     version="1.0.0"
 )
 
+
+# ============================================================
+# CORS
+# ============================================================
 
 app.add_middleware(
     CORSMiddleware,
@@ -29,6 +34,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# ============================================================
+# ROUTES
+# ============================================================
 
 app.include_router(github_auth_router)
 app.include_router(memory_router)

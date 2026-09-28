@@ -54,14 +54,43 @@ def create_new_application(
 
 @router.get("")
 def list_applications(request: Request):
-    user = get_current_user(request)
 
-    applications = get_user_applications(user["id"])
+    try:
 
-    return {
-        "success": True,
-        "applications": applications
-    }
+        print("====================================")
+        print("GET APPLICATIONS")
+        print("====================================")
+
+        user = get_current_user(request)
+
+        print("USER:")
+        print(user)
+
+        applications = get_user_applications(
+            user["id"]
+        )
+
+        print("APPLICATIONS:")
+        print(applications)
+
+        return {
+            "success": True,
+            "applications": applications
+        }
+
+    except Exception as e:
+
+        print("====================================")
+        print("APPLICATIONS ERROR")
+        print("====================================")
+        print(type(e).__name__)
+        print(str(e))
+        print("====================================")
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
 
 
 @router.get("/{application_id}")
