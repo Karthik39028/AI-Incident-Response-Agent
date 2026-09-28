@@ -2,10 +2,7 @@
 .env.*
 !.env.example
 __pycache__/
-*.pyc
-venv/
+*.py[cod]
 .venv/
-node_modules/
-dist/
-.vscode/
-.idea/
+venv/
+*.log
