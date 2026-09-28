@@ -315,7 +315,7 @@ function Applications() {
                       {app.source_type && (
 
                         <span>
-                          <Github size={14} />
+                          <GitBranch  size={14} />
                           {app.source_type}
                         </span>
 
