@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 import {
@@ -31,6 +31,53 @@ function AddApplication() {
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+
+  const [repositories, setRepositories] = useState([]);
+  const [repositoriesLoading, setRepositoriesLoading] = useState(true);
+  const [repositoryError, setRepositoryError] = useState("");
+
+  useEffect(() => {
+    const loadRepositories = async () => {
+      try {
+        setRepositoriesLoading(true);
+        setRepositoryError("");
+
+        const response = await fetch(
+          `${API_URL}/api/auth/github/repositories`,
+          {
+            method: "GET",
+            credentials: "include",
+          }
+        );
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(
+            data.detail || "Failed to load GitHub repositories."
+          );
+        }
+
+        setRepositories(data.repositories || []);
+
+        // Since this page is now connected to GitHub repositories,
+        // default the source type to GitHub.
+        setForm((previous) => ({
+          ...previous,
+          source_type: "GitHub",
+        }));
+      } catch (err) {
+        console.error("Repository loading error:", err);
+        setRepositoryError(
+          err.message || "Unable to load GitHub repositories."
+        );
+      } finally {
+        setRepositoriesLoading(false);
+      }
+    };
+
+    loadRepositories();
+  }, []);
 
   const handleChange = (e) => {
     const { name, value } = e.target;
@@ -337,7 +384,6 @@ function AddApplication() {
                   value={form.source_type}
                   onChange={handleChange}
                 >
-
                   <option value="">
                     Select source
                   </option>
@@ -357,7 +403,6 @@ function AddApplication() {
                   <option value="Other">
                     Other
                   </option>
-
                 </select>
 
               </div>
@@ -366,22 +411,61 @@ function AddApplication() {
               <div className="form-field">
 
                 <label>
-                  Repository URL
+                  GitHub Repository
                 </label>
 
                 <div className="input-with-icon">
-
                   <GitBranch size={16} />
 
-                  <input
-                    type="url"
-                    name="source_url"
+                  <select
                     value={form.source_url}
-                    onChange={handleChange}
-                    placeholder="https://github.com/user/repository"
-                  />
+                    onChange={(e) => {
+                      const selectedUrl = e.target.value;
+                      const selectedRepository = repositories.find(
+                        (repo) => repo.url === selectedUrl
+                      );
 
+                      setForm((previous) => ({
+                        ...previous,
+                        source_type: "GitHub",
+                        source_url: selectedUrl,
+                        name:
+                          previous.name ||
+                          selectedRepository?.name ||
+                          "",
+                        description:
+                          previous.description ||
+                          selectedRepository?.description ||
+                          "",
+                      }));
+                    }}
+                    disabled={repositoriesLoading || !!repositoryError}
+                  >
+                    <option value="">
+                      {repositoriesLoading
+                        ? "Loading GitHub repositories..."
+                        : "Select a repository"}
+                    </option>
+
+                    {repositories.map((repo) => (
+                      <option key={repo.id} value={repo.url}>
+                        {repo.fullName}
+                      </option>
+                    ))}
+                  </select>
                 </div>
+
+                {repositoryError && (
+                  <div className="form-error">
+                    {repositoryError}
+                  </div>
+                )}
+
+                {form.source_url && (
+                  <small style={{ marginTop: "8px", display: "block" }}>
+                    {form.source_url}
+                  </small>
+                )}
 
               </div>
 

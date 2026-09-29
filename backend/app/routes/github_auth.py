@@ -1,6 +1,8 @@
 import secrets
 import requests
 
+from urllib.parse import urlencode
+
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse, JSONResponse
 
@@ -60,15 +62,26 @@ def github_login():
 
     # --------------------------------------------------------
     # GitHub authorization URL
+    #
+    # IMPORTANT:
+    # repo scope is required so the OAuth token can access
+    # repository contents, including private repositories
+    # that the authenticated user can access.
     # --------------------------------------------------------
 
+    oauth_params = {
+        "client_id": GITHUB_CLIENT_ID,
+        "redirect_uri": GITHUB_REDIRECT_URI,
+        "state": state,
+        "scope": "repo",
+    }
+
     github_authorize_url = (
-        "https://github.com/login/oauth/authorize"
-        f"?client_id={GITHUB_CLIENT_ID}"
-        f"&redirect_uri={GITHUB_REDIRECT_URI}"
-        f"&state={state}"
+        "https://github.com/login/oauth/authorize?"
+        + urlencode(oauth_params)
     )
 
+    print("GitHub OAuth scope: repo")
     print("Redirecting user to GitHub")
     print("========================================\n")
 
@@ -192,7 +205,7 @@ def github_callback(
                 "redirect_uri": GITHUB_REDIRECT_URI,
             },
             headers={
-                "Accept": "application/json"
+                "Accept": "application/json",
             },
             timeout=15,
         )
@@ -317,6 +330,8 @@ def github_callback(
             headers={
                 "Authorization": f"Bearer {access_token}",
                 "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+                "User-Agent": "AI-Incident-Response-Agent",
             },
             timeout=15,
         )
@@ -501,6 +516,8 @@ def github_me(request: Request):
             headers={
                 "Authorization": f"Bearer {access_token}",
                 "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+                "User-Agent": "AI-Incident-Response-Agent",
             },
             timeout=15,
         )
@@ -570,6 +587,115 @@ def github_me(request: Request):
             "avatar_url": user.get("avatar_url"),
             "html_url": user.get("html_url"),
         }
+    }
+
+
+# ============================================================
+# GET GITHUB REPOSITORIES
+# ============================================================
+
+@router.get("/repositories")
+def get_github_repositories(request: Request):
+    """
+    Return the real GitHub repositories belonging to
+    the currently authenticated GitHub user.
+    """
+
+    access_token = request.cookies.get(
+        "github_session"
+    )
+
+    if not access_token:
+        raise HTTPException(
+            status_code=401,
+            detail="GitHub session not found. Please login again."
+        )
+
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "AI-Incident-Response-Agent",
+    }
+
+    repositories = []
+    page = 1
+
+    try:
+
+        while True:
+
+            response = requests.get(
+                "https://api.github.com/user/repos",
+                headers=headers,
+                params={
+                    "per_page": 100,
+                    "page": page,
+                    "sort": "updated",
+                    "direction": "desc",
+                },
+                timeout=15,
+            )
+
+            if response.status_code != 200:
+
+                try:
+                    github_error = response.json()
+
+                    detail = github_error.get(
+                        "message",
+                        "GitHub repository request failed"
+                    )
+
+                except ValueError:
+
+                    detail = (
+                        "GitHub repository request failed"
+                    )
+
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=detail,
+                )
+
+            page_data = response.json()
+
+            if not page_data:
+                break
+
+            for repo in page_data:
+
+                repositories.append({
+                    "id": repo.get("id"),
+                    "name": repo.get("name"),
+                    "fullName": repo.get("full_name"),
+                    "url": repo.get("html_url"),
+                    "private": repo.get("private", False),
+                    "defaultBranch": repo.get("default_branch"),
+                    "owner": (
+                        repo.get("owner") or {}
+                    ).get("login"),
+                    "description": repo.get(
+                        "description"
+                    ),
+                    "language": repo.get("language"),
+                })
+
+            if len(page_data) < 100:
+                break
+
+            page += 1
+
+    except requests.RequestException:
+
+        raise HTTPException(
+            status_code=502,
+            detail="Could not connect to GitHub repository API"
+        )
+
+    return {
+        "repositories": repositories,
+        "total": len(repositories),
     }
 
 
