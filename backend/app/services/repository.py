@@ -1,4 +1,6 @@
+import base64
 import requests
+
 from urllib.parse import urlparse, quote
 
 
@@ -26,6 +28,18 @@ BLOCKED_EXTENSIONS = {
     ".p12",
     ".pfx",
 }
+
+
+# Maximum amount of source code we allow the agent to read
+# from one repository file.
+MAX_FILE_SIZE = 200_000
+
+
+# Maximum number of repository files returned by the scanner.
+#
+# The repository_context service will later select only the
+# most relevant files from this list.
+MAX_REPOSITORY_FILES = 5_000
 
 
 # ============================================================
@@ -90,39 +104,27 @@ def is_safe_file(path: str):
 
 
 # ============================================================
-# GET REPOSITORY INFORMATION
+# GITHUB HEADERS
 # ============================================================
 
-def get_repository_tree(
-    repository_url: str,
-    github_token: str,
-):
+def build_github_headers(github_token: str):
 
-    owner, repository = parse_github_repository_url(
-        repository_url
-    )
-
-    headers = {
+    return {
         "Authorization": f"Bearer {github_token}",
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
         "User-Agent": "AI-Incident-Response-Agent",
     }
 
-    # ========================================================
-    # 1. GET REPOSITORY METADATA
-    # ========================================================
 
-    repository_api_url = (
-        f"{GITHUB_API}/repos/"
-        f"{owner}/{repository}"
-    )
+# ============================================================
+# GITHUB ERROR HANDLER
+# ============================================================
 
-    response = requests.get(
-        repository_api_url,
-        headers=headers,
-        timeout=15,
-    )
+def raise_github_error(
+    response,
+    action: str,
+):
 
     if response.status_code == 401:
 
@@ -142,17 +144,51 @@ def get_repository_tree(
     if response.status_code == 404:
 
         raise ValueError(
-            "GitHub repository not found or not accessible. "
-            "Check the repository URL and GitHub permissions."
+            f"GitHub {action} failed because the repository "
+            "or requested resource was not found."
         )
 
     if response.status_code != 200:
 
         raise ValueError(
-            f"GitHub repository request failed: "
+            f"GitHub {action} failed: "
             f"{response.status_code} - "
             f"{response.text[:500]}"
         )
+
+
+# ============================================================
+# GET REPOSITORY INFORMATION
+# ============================================================
+
+def get_repository_metadata(
+    repository_url: str,
+    github_token: str,
+):
+
+    owner, repository = parse_github_repository_url(
+        repository_url
+    )
+
+    headers = build_github_headers(
+        github_token
+    )
+
+    repository_api_url = (
+        f"{GITHUB_API}/repos/"
+        f"{owner}/{repository}"
+    )
+
+    response = requests.get(
+        repository_api_url,
+        headers=headers,
+        timeout=15,
+    )
+
+    raise_github_error(
+        response,
+        "repository request",
+    )
 
     repo_data = response.json()
 
@@ -166,177 +202,13 @@ def get_repository_tree(
             "GitHub repository has no default branch"
         )
 
-    # ========================================================
-    # 2. REPOSITORY FILE COLLECTION
-    # ========================================================
-
-    files = []
-
-    # Prevent runaway recursion
-    visited_directories = set()
-
-    # ========================================================
-    # 3. SCAN DIRECTORY USING CONTENTS API
-    # ========================================================
-
-    def scan_directory(path=""):
-
-        if path in visited_directories:
-            return
-
-        visited_directories.add(path)
-
-        # ----------------------------------------------------
-        # Build GitHub Contents API URL
-        # ----------------------------------------------------
-
-        if path:
-
-            encoded_path = quote(
-                path,
-                safe="/"
-            )
-
-            url = (
-                f"{GITHUB_API}/repos/"
-                f"{owner}/{repository}/contents/"
-                f"{encoded_path}"
-            )
-
-        else:
-
-            url = (
-                f"{GITHUB_API}/repos/"
-                f"{owner}/{repository}/contents"
-            )
-
-        # ----------------------------------------------------
-        # Request directory
-        # ----------------------------------------------------
-
-        response = requests.get(
-            url,
-            params={
-                "ref": default_branch,
-            },
-            headers=headers,
-            timeout=20,
-        )
-
-        # ----------------------------------------------------
-        # Authentication
-        # ----------------------------------------------------
-
-        if response.status_code == 401:
-
-            raise ValueError(
-                "GitHub authentication failed. "
-                "Please login to GitHub again."
-            )
-
-        # ----------------------------------------------------
-        # Permission
-        # ----------------------------------------------------
-
-        if response.status_code == 403:
-
-            raise ValueError(
-                "GitHub denied access to repository contents. "
-                "Your OAuth token may not have repository access."
-            )
-
-        # ----------------------------------------------------
-        # Not found
-        # ----------------------------------------------------
-
-        if response.status_code == 404:
-
-            raise ValueError(
-                "GitHub repository contents could not be accessed. "
-                f"Path: {path or '/'} | "
-                f"Branch: {default_branch} | "
-                f"Response: {response.text[:500]}"
-            )
-
-        # ----------------------------------------------------
-        # Other errors
-        # ----------------------------------------------------
-
-        if response.status_code != 200:
-
-            raise ValueError(
-                f"GitHub contents request failed: "
-                f"{response.status_code} - "
-                f"{response.text[:500]}"
-            )
-
-        # ----------------------------------------------------
-        # Parse response
-        # ----------------------------------------------------
-
-        items = response.json()
-
-        # GitHub returns an object instead of a list if
-        # the requested path is a single file.
-        if not isinstance(items, list):
-
-            return
-
-        # ====================================================
-        # PROCESS DIRECTORY CONTENTS
-        # ====================================================
-
-        for item in items:
-
-            item_type = item.get("type")
-            item_path = item.get("path")
-
-            if not item_path:
-                continue
-
-            # ------------------------------------------------
-            # Directory
-            # ------------------------------------------------
-
-            if item_type == "dir":
-
-                scan_directory(item_path)
-
-            # ------------------------------------------------
-            # File
-            # ------------------------------------------------
-
-            elif item_type == "file":
-
-                if not is_safe_file(item_path):
-                    continue
-
-                files.append({
-                    "path": item_path,
-                    "sha": item.get("sha"),
-                    "size": item.get("size"),
-                    "download_url": item.get(
-                        "download_url"
-                    ),
-                })
-
-    # ========================================================
-    # START SCANNING
-    # ========================================================
-
-    scan_directory()
-
-    # ========================================================
-    # 4. RETURN REPOSITORY STRUCTURE
-    # ========================================================
-
     return {
         "owner": owner,
         "repository": repository,
         "default_branch": default_branch,
         "private": repo_data.get(
             "private",
-            False
+            False,
         ),
         "description": repo_data.get(
             "description"
@@ -344,6 +216,343 @@ def get_repository_tree(
         "language": repo_data.get(
             "language"
         ),
+    }
+
+
+# ============================================================
+# GET REPOSITORY TREE
+# ============================================================
+
+def get_repository_tree(
+    repository_url: str,
+    github_token: str,
+):
+
+    # --------------------------------------------------------
+    # 1. Get repository metadata
+    # --------------------------------------------------------
+
+    metadata = get_repository_metadata(
+        repository_url=repository_url,
+        github_token=github_token,
+    )
+
+    owner = metadata["owner"]
+    repository = metadata["repository"]
+    default_branch = metadata["default_branch"]
+
+    headers = build_github_headers(
+        github_token
+    )
+
+    # --------------------------------------------------------
+    # 2. Get branch information
+    #
+    # We need the branch SHA because the Git Trees API works
+    # from a Git tree SHA.
+    # --------------------------------------------------------
+
+    branch_url = (
+        f"{GITHUB_API}/repos/"
+        f"{owner}/{repository}/branches/"
+        f"{quote(default_branch, safe='')}"
+    )
+
+    branch_response = requests.get(
+        branch_url,
+        headers=headers,
+        timeout=15,
+    )
+
+    raise_github_error(
+        branch_response,
+        "branch request",
+    )
+
+    branch_data = branch_response.json()
+
+    commit_data = branch_data.get(
+        "commit"
+    )
+
+    if not commit_data:
+
+        raise ValueError(
+            "GitHub branch does not contain commit information"
+        )
+
+    commit_sha = commit_data.get(
+        "sha"
+    )
+
+    if not commit_sha:
+
+        raise ValueError(
+            "GitHub branch does not contain a commit SHA"
+        )
+
+    # --------------------------------------------------------
+    # 3. Get the complete repository tree
+    #
+    # This is the important performance improvement.
+    #
+    # Instead of:
+    #
+    #   directory -> API request
+    #   subdirectory -> API request
+    #   subdirectory -> API request
+    #
+    # GitHub returns the repository tree recursively.
+    # --------------------------------------------------------
+
+    tree_url = (
+        f"{GITHUB_API}/repos/"
+        f"{owner}/{repository}/git/trees/"
+        f"{commit_sha}"
+    )
+
+    tree_response = requests.get(
+        tree_url,
+        params={
+            "recursive": "1",
+        },
+        headers=headers,
+        timeout=30,
+    )
+
+    if tree_response.status_code == 409:
+
+        raise ValueError(
+            "GitHub could not read the repository tree. "
+            "The repository may be empty."
+        )
+
+    raise_github_error(
+        tree_response,
+        "repository tree request",
+    )
+
+    tree_data = tree_response.json()
+
+    tree_items = tree_data.get(
+        "tree",
+        [],
+    )
+
+    files = []
+
+    # --------------------------------------------------------
+    # 4. Process repository files
+    # --------------------------------------------------------
+
+    for item in tree_items:
+
+        item_type = item.get(
+            "type"
+        )
+
+        item_path = item.get(
+            "path"
+        )
+
+        if item_type != "blob":
+            continue
+
+        if not item_path:
+            continue
+
+        # Security filtering
+        if not is_safe_file(item_path):
+            continue
+
+        files.append({
+            "path": item_path,
+            "sha": item.get("sha"),
+            "size": item.get("size"),
+            "download_url": (
+                f"{GITHUB_API}/repos/"
+                f"{owner}/{repository}/contents/"
+                f"{quote(item_path, safe='/')}"
+            ),
+        })
+
+        # Prevent an unexpectedly huge repository from
+        # producing an enormous response.
+        if len(files) >= MAX_REPOSITORY_FILES:
+            break
+
+    # --------------------------------------------------------
+    # 5. Return repository structure
+    # --------------------------------------------------------
+
+    return {
+        "owner": owner,
+        "repository": repository,
+        "default_branch": default_branch,
+        "private": metadata["private"],
+        "description": metadata["description"],
+        "language": metadata["language"],
         "file_count": len(files),
         "files": files,
+    }
+
+
+# ============================================================
+# GET SOURCE FILE CONTENT
+# ============================================================
+
+def get_repository_file(
+    repository_url: str,
+    github_token: str,
+    file_path: str,
+):
+
+    owner, repository = parse_github_repository_url(
+        repository_url
+    )
+
+    # --------------------------------------------------------
+    # Security check
+    # --------------------------------------------------------
+
+    if not is_safe_file(file_path):
+
+        raise ValueError(
+            "Access to this file is blocked for security reasons"
+        )
+
+    headers = build_github_headers(
+        github_token
+    )
+
+    # --------------------------------------------------------
+    # Get repository metadata
+    # --------------------------------------------------------
+
+    repository_api_url = (
+        f"{GITHUB_API}/repos/"
+        f"{owner}/{repository}"
+    )
+
+    repository_response = requests.get(
+        repository_api_url,
+        headers=headers,
+        timeout=15,
+    )
+
+    raise_github_error(
+        repository_response,
+        "repository request",
+    )
+
+    repository_data = repository_response.json()
+
+    default_branch = repository_data.get(
+        "default_branch"
+    )
+
+    if not default_branch:
+
+        raise ValueError(
+            "GitHub repository has no default branch"
+        )
+
+    # --------------------------------------------------------
+    # Request the file
+    # --------------------------------------------------------
+
+    encoded_path = quote(
+        file_path,
+        safe="/",
+    )
+
+    url = (
+        f"{GITHUB_API}/repos/"
+        f"{owner}/{repository}/contents/"
+        f"{encoded_path}"
+    )
+
+    response = requests.get(
+        url,
+        params={
+            "ref": default_branch,
+        },
+        headers=headers,
+        timeout=20,
+    )
+
+    raise_github_error(
+        response,
+        "file request",
+    )
+
+    file_data = response.json()
+
+    # --------------------------------------------------------
+    # Make sure GitHub returned a file
+    # --------------------------------------------------------
+
+    if file_data.get("type") != "file":
+
+        raise ValueError(
+            f"Repository path is not a file: "
+            f"{file_path}"
+        )
+
+    file_size = file_data.get(
+        "size",
+        0,
+    )
+
+    if file_size > MAX_FILE_SIZE:
+
+        raise ValueError(
+            f"Repository file is too large to analyze: "
+            f"{file_path}"
+        )
+
+    encoded_content = file_data.get(
+        "content"
+    )
+
+    if not encoded_content:
+
+        raise ValueError(
+            f"Repository file has no readable content: "
+            f"{file_path}"
+        )
+
+    # --------------------------------------------------------
+    # Decode GitHub content
+    # --------------------------------------------------------
+
+    try:
+
+        content = base64.b64decode(
+            encoded_content
+        ).decode(
+            "utf-8"
+        )
+
+    except (
+        ValueError,
+        UnicodeDecodeError,
+    ):
+
+        raise ValueError(
+            f"Repository file is not readable as UTF-8 text: "
+            f"{file_path}"
+        )
+
+    # --------------------------------------------------------
+    # Return file
+    # --------------------------------------------------------
+
+    return {
+        "path": file_path,
+        "size": file_size,
+        "sha": file_data.get(
+            "sha"
+        ),
+        "content": content,
     }

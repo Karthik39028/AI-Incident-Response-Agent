@@ -79,7 +79,6 @@ function IncidentDetails() {
         service:
           data.application?.name || "",
       }));
-
     } catch (err) {
       console.error(err);
 
@@ -111,15 +110,12 @@ function IncidentDetails() {
       setAnalysis(null);
 
       const payload = {
+        application_id: Number(id),
         service: form.service,
         latencyMs: Number(form.latencyMs),
         errorRate: Number(form.errorRate),
-        dbConnections: Number(
-          form.dbConnections
-        ),
-        dbConnectionLimit: Number(
-          form.dbConnectionLimit
-        ),
+        dbConnections: Number(form.dbConnections),
+        dbConnectionLimit: Number(form.dbConnectionLimit),
         cpu: Number(form.cpu),
         memory: Number(form.memory),
       };
@@ -132,6 +128,8 @@ function IncidentDetails() {
           headers: {
             "Content-Type": "application/json",
           },
+
+          credentials: "include",
 
           body: JSON.stringify(payload),
         }
