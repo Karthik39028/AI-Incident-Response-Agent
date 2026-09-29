@@ -45,11 +45,27 @@ function IncidentDetails() {
   const [analyzing, setAnalyzing] =
     useState(false);
 
+  const [recoveryAction, setRecoveryAction] =
+    useState(null);
+
+  const [creatingRecovery, setCreatingRecovery] =
+    useState(false);
+
+  const [approvingRecovery, setApprovingRecovery] =
+    useState(false);
+
+  const [investigatingAgain, setInvestigatingAgain] =
+    useState(false);
+
   const [error, setError] = useState("");
 
   useEffect(() => {
     loadApplication();
   }, [id]);
+
+  // =========================================================
+  // LOAD APPLICATION
+  // =========================================================
 
   const loadApplication = async () => {
     try {
@@ -91,6 +107,10 @@ function IncidentDetails() {
     }
   };
 
+  // =========================================================
+  // HANDLE FORM
+  // =========================================================
+
   const handleChange = (event) => {
     const { name, value } = event.target;
 
@@ -103,11 +123,16 @@ function IncidentDetails() {
     }));
   };
 
+  // =========================================================
+  // ANALYZE INCIDENT
+  // =========================================================
+
   const analyzeIncident = async () => {
     try {
       setAnalyzing(true);
       setError("");
       setAnalysis(null);
+      setRecoveryAction(null);
 
       const payload = {
         application_id: Number(id),
@@ -158,6 +183,255 @@ function IncidentDetails() {
     }
   };
 
+  // =========================================================
+  // CREATE RECOVERY / INVESTIGATION ACTION
+  // =========================================================
+
+  const createRecoveryAction = async () => {
+    try {
+      setCreatingRecovery(true);
+      setError("");
+
+      const incidentId =
+        analysis?.incidentId;
+
+      if (!incidentId) {
+        throw new Error(
+          "No persisted incident ID was returned by the analysis."
+        );
+      }
+
+      const response = await fetch(
+        `${API_URL}/api/recovery/incidents/${incidentId}/action`,
+        {
+          method: "POST",
+          credentials: "include",
+        }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data.detail ||
+            "Unable to create recovery action."
+        );
+      }
+
+      // Backend response: { success: true, recovery: { action: { id: ... } } }
+      const actionId =
+        data.recovery?.action?.id ??
+        data.recovery?.action?.actionId ??
+        data.recovery?.actionId ??
+        data.actionId ??
+        data.action?.id ??
+        data.action?.actionId;
+
+      if (!actionId) {
+        throw new Error(
+          "Action was created but no action ID was returned."
+        );
+      }
+
+      const actionResponse = await fetch(
+        `${API_URL}/api/recovery/actions/${actionId}`,
+        {
+          credentials: "include",
+        }
+      );
+
+      const actionData =
+        await actionResponse.json();
+
+      if (!actionResponse.ok) {
+        throw new Error(
+          actionData.detail ||
+            "Unable to load the action."
+        );
+      }
+
+      setRecoveryAction(
+        actionData.recovery
+      );
+
+    } catch (err) {
+      console.error(err);
+
+      setError(
+        err.message ||
+          "Unable to create action."
+      );
+    } finally {
+      setCreatingRecovery(false);
+    }
+  };
+
+  // =========================================================
+  // APPROVE ACTION
+  // =========================================================
+
+  const approveRecoveryAction = async () => {
+    try {
+      setApprovingRecovery(true);
+      setError("");
+
+      if (!recoveryAction?.id) {
+        throw new Error(
+          "No action is available for approval."
+        );
+      }
+
+      const response = await fetch(
+        `${API_URL}/api/recovery/actions/${recoveryAction.id}/approve`,
+        {
+          method: "POST",
+          credentials: "include",
+        }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data.detail ||
+            "Unable to approve action."
+        );
+      }
+
+      setRecoveryAction((previous) => ({
+        ...previous,
+
+        status:
+          data.recovery?.status ||
+          "APPROVED",
+
+        approved_by:
+          data.recovery?.approvedBy ||
+          previous?.approved_by,
+      }));
+
+    } catch (err) {
+      console.error(err);
+
+      setError(
+        err.message ||
+          "Unable to approve action."
+      );
+    } finally {
+      setApprovingRecovery(false);
+    }
+  };
+
+  // =========================================================
+  // INVESTIGATE AGAIN
+  // =========================================================
+
+  const investigateAgain = async () => {
+    try {
+      setInvestigatingAgain(true);
+      setError("");
+
+      if (!recoveryAction?.id) {
+        throw new Error(
+          "No approved investigation action is available."
+        );
+      }
+
+      if (
+        recoveryAction.action_type !==
+        "investigation_required"
+      ) {
+        throw new Error(
+          "This action is not an investigation action."
+        );
+      }
+
+      if (
+        recoveryAction.status !==
+        "APPROVED"
+      ) {
+        throw new Error(
+          "The investigation must be approved before running it."
+        );
+      }
+
+      const payload = {
+        application_id: Number(id),
+        service: form.service,
+        latencyMs: Number(form.latencyMs),
+        errorRate: Number(form.errorRate),
+        dbConnections: Number(form.dbConnections),
+        dbConnectionLimit: Number(form.dbConnectionLimit),
+        cpu: Number(form.cpu),
+        memory: Number(form.memory),
+      };
+
+      const response = await fetch(
+        `${API_URL}/api/recovery/actions/${recoveryAction.id}/investigate`,
+        {
+          method: "POST",
+
+          headers: {
+            "Content-Type": "application/json",
+          },
+
+          credentials: "include",
+
+          body: JSON.stringify(payload),
+        }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data.detail ||
+            "Investigation failed."
+        );
+      }
+
+      /*
+       * The backend returns:
+       *
+       * {
+       *   success: true,
+       *   message: "...",
+       *   investigation: {...}
+       * }
+       *
+       * Keep this defensive so the UI also works
+       * if the backend returns the analysis object
+       * directly.
+       */
+      const newAnalysis =
+        data.investigation || data;
+
+      setAnalysis(newAnalysis);
+
+      /*
+       * The old investigation action belongs to the
+       * previous incident attempt. Clear it so the
+       * engineer can create a NEW recovery/investigation
+       * action for the NEW analysis.
+       */
+      setRecoveryAction(null);
+
+    } catch (err) {
+      console.error(err);
+
+      setError(
+        err.message ||
+          "Unable to investigate the incident again."
+      );
+    } finally {
+      setInvestigatingAgain(false);
+    }
+  };
+
+  // =========================================================
+  // ANALYSIS DATA
+  // =========================================================
+
   const confidence =
     analysis?.aiAnalysis?.diagnosis?.confidence;
 
@@ -175,6 +449,19 @@ function IncidentDetails() {
   const recommendation =
     analysis?.aiAnalysis?.recommendation;
 
+  const recommendationType =
+    recommendation?.type ||
+    recommendation?.recommendationType ||
+    recommendation?.recommendation_type;
+
+  const isInvestigation =
+    recommendationType ===
+    "investigation_required";
+
+  // =========================================================
+  // LOADING
+  // =========================================================
+
   if (loadingApplication) {
     return (
       <div className="incident-loading-page">
@@ -191,6 +478,10 @@ function IncidentDetails() {
       </div>
     );
   }
+
+  // =========================================================
+  // APPLICATION NOT FOUND
+  // =========================================================
 
   if (!application) {
     return (
@@ -221,10 +512,16 @@ function IncidentDetails() {
     );
   }
 
+  // =========================================================
+  // PAGE
+  // =========================================================
+
   return (
     <div className="incident-details-page">
 
-      {/* ================= HEADER ================= */}
+      {/* =====================================================
+          HEADER
+      ===================================================== */}
 
       <header className="incident-header">
 
@@ -291,7 +588,9 @@ function IncidentDetails() {
 
       <main className="incident-content">
 
-        {/* ================= ERROR ================= */}
+        {/* =================================================
+            ERROR
+        ================================================= */}
 
         {error && (
 
@@ -308,7 +607,9 @@ function IncidentDetails() {
         )}
 
 
-        {/* ================= INPUT SECTION ================= */}
+        {/* =================================================
+            INPUT
+        ================================================= */}
 
         <section className="incident-input-panel">
 
@@ -542,7 +843,8 @@ function IncidentDetails() {
 
               <span>
                 AI will compare current telemetry
-                with historical incidents.
+                with repository evidence and
+                historical experience.
               </span>
 
             </div>
@@ -577,7 +879,9 @@ function IncidentDetails() {
         </section>
 
 
-        {/* ================= RESULTS ================= */}
+        {/* =================================================
+            PLACEHOLDER
+        ================================================= */}
 
         {!analysis && !analyzing && (
 
@@ -594,8 +898,9 @@ function IncidentDetails() {
             <p>
               Enter the current telemetry above and
               run the AI analysis. The agent will
-              evaluate the current evidence and compare
-              it with historical experience.
+              evaluate the current evidence, inspect
+              repository context, and compare it
+              with historical experience.
             </p>
 
           </section>
@@ -603,14 +908,16 @@ function IncidentDetails() {
         )}
 
 
+        {/* =================================================
+            ANALYZING
+        ================================================= */}
+
         {analyzing && (
 
           <section className="analysis-placeholder">
 
             <div className="analysis-animation">
-
               <Sparkles size={28} />
-
             </div>
 
             <h2>
@@ -618,9 +925,10 @@ function IncidentDetails() {
             </h2>
 
             <p>
-              Checking current telemetry, searching
-              Hindsight memory, and generating an
-              evidence-based analysis.
+              Understanding the repository,
+              checking telemetry, searching
+              Hindsight memory, and generating
+              an evidence-based analysis.
             </p>
 
           </section>
@@ -628,11 +936,17 @@ function IncidentDetails() {
         )}
 
 
+        {/* =================================================
+            RESULTS
+        ================================================= */}
+
         {analysis && !analyzing && (
 
           <div className="analysis-results">
 
-            {/* ================= DIAGNOSIS ================= */}
+            {/* =================================================
+                DIAGNOSIS
+            ================================================= */}
 
             <section className="diagnosis-card">
 
@@ -706,10 +1020,11 @@ function IncidentDetails() {
             </section>
 
 
-            {/* ================= TWO COLUMN RESULTS ================= */}
+            {/* =================================================
+                EVIDENCE + HISTORY
+            ================================================= */}
 
             <div className="result-grid">
-
 
               {/* EVIDENCE */}
 
@@ -867,7 +1182,9 @@ function IncidentDetails() {
             </div>
 
 
-            {/* ================= RECOMMENDATION ================= */}
+            {/* =================================================
+                RECOMMENDATION
+            ================================================= */}
 
             <section className="recommendation-card">
 
@@ -880,7 +1197,9 @@ function IncidentDetails() {
                 <div>
 
                   <span>
-                    RECOMMENDED NEXT ACTION
+                    {isInvestigation
+                      ? "RECOMMENDED NEXT INVESTIGATION"
+                      : "RECOMMENDED NEXT ACTION"}
                   </span>
 
                   <h2>
@@ -925,12 +1244,272 @@ function IncidentDetails() {
 
                 )}
 
+
+                {/* =================================================
+                    ACTION
+                ================================================= */}
+
+                {recommendation && (
+
+                  <div
+                    style={{
+                      marginTop: "20px",
+                      paddingTop: "18px",
+                      borderTop:
+                        "1px solid rgba(255,255,255,0.08)",
+                    }}
+                  >
+
+                    {!recoveryAction && (
+
+                      <button
+                        className="run-analysis-button"
+                        onClick={createRecoveryAction}
+                        disabled={
+                          creatingRecovery ||
+                          investigatingAgain
+                        }
+                      >
+
+                        {creatingRecovery ? (
+                          <>
+                            <Loader2
+                              size={17}
+                              className="button-spin"
+                            />
+
+                            {isInvestigation
+                              ? "Creating Investigation..."
+                              : "Creating Recovery Action..."}
+                          </>
+                        ) : (
+                          <>
+                            <ShieldAlert size={17} />
+
+                            {isInvestigation
+                              ? "Investigate Further"
+                              : "Create Recovery Action"}
+                          </>
+                        )}
+
+                      </button>
+
+                    )}
+
+
+                    {recoveryAction && (
+
+                      <div>
+
+                        <div
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: "10px",
+                            marginBottom: "12px",
+                          }}
+                        >
+
+                          {recoveryAction.status ===
+                          "APPROVED" ? (
+                            <CheckCircle2
+                              size={18}
+                              style={{
+                                color: "#22c55e",
+                              }}
+                            />
+                          ) : (
+                            <ShieldAlert
+                              size={18}
+                              style={{
+                                color: "#f59e0b",
+                              }}
+                            />
+                          )}
+
+                          <strong>
+
+                            {recoveryAction.action_type ===
+                            "investigation_required"
+                              ? "Investigation: "
+                              : "Recovery Action: "}
+
+                            {recoveryAction.status}
+
+                          </strong>
+
+                        </div>
+
+
+                        <p>
+                          {recoveryAction.action_description ||
+                            recoveryAction.action ||
+                            "No action description available."}
+                        </p>
+
+
+                        {/* APPROVAL BUTTON */}
+
+                        {(
+                          recoveryAction.status ===
+                            "PENDING_APPROVAL" ||
+                          recoveryAction.status ===
+                            "INVESTIGATION_PENDING"
+                        ) && (
+
+                          <button
+                            className="run-analysis-button"
+                            onClick={
+                              approveRecoveryAction
+                            }
+                            disabled={approvingRecovery}
+                            style={{
+                              marginTop: "12px",
+                            }}
+                          >
+
+                            {approvingRecovery ? (
+                              <>
+                                <Loader2
+                                  size={17}
+                                  className="button-spin"
+                                />
+
+                                Approving...
+                              </>
+                            ) : (
+                              <>
+                                <CheckCircle2
+                                  size={17}
+                                />
+
+                                {recoveryAction.action_type ===
+                                "investigation_required"
+                                  ? "Approve Investigation"
+                                  : "Approve Recovery Action"}
+
+                              </>
+                            )}
+
+                          </button>
+
+                        )}
+
+
+                        {/* INVESTIGATION APPROVED */}
+
+                        {recoveryAction.action_type ===
+                          "investigation_required" &&
+                        recoveryAction.status ===
+                          "APPROVED" && (
+
+                          <div
+                            style={{
+                              marginTop: "14px",
+                              padding: "16px",
+                              borderRadius: "10px",
+                              border:
+                                "1px solid rgba(34,197,94,0.25)",
+                              background:
+                                "rgba(34,197,94,0.06)",
+                            }}
+                          >
+
+                            <p
+                              style={{
+                                margin: 0,
+                                color: "#22c55e",
+                              }}
+                            >
+                              Human approval recorded.
+                              Investigation is now authorized.
+                            </p>
+
+                            <p
+                              style={{
+                                marginTop: "8px",
+                                marginBottom: 0,
+                                opacity: 0.8,
+                              }}
+                            >
+                              Update the telemetry values above
+                              with the latest production evidence,
+                              then run the investigation again.
+                            </p>
+
+                            <button
+                              className="run-analysis-button"
+                              onClick={
+                                investigateAgain
+                              }
+                              disabled={
+                                investigatingAgain
+                              }
+                              style={{
+                                marginTop: "14px",
+                              }}
+                            >
+
+                              {investigatingAgain ? (
+                                <>
+                                  <Loader2
+                                    size={17}
+                                    className="button-spin"
+                                  />
+
+                                  Investigating Again...
+                                </>
+                              ) : (
+                                <>
+                                  <Brain size={17} />
+
+                                  Investigate Again
+                                </>
+                              )}
+
+                            </button>
+
+                          </div>
+
+                        )}
+
+
+                        {/* NORMAL RECOVERY APPROVED */}
+
+                        {recoveryAction.action_type !==
+                          "investigation_required" &&
+                        recoveryAction.status ===
+                          "APPROVED" && (
+
+                          <p
+                            style={{
+                              marginTop: "12px",
+                              color: "#22c55e",
+                            }}
+                          >
+                            Human approval recorded.
+                            No recovery operation has
+                            been executed yet.
+                          </p>
+
+                        )}
+
+                      </div>
+
+                    )}
+
+                  </div>
+
+                )}
+
               </div>
 
             </section>
 
 
-            {/* ================= TELEMETRY ================= */}
+            {/* =================================================
+                TELEMETRY
+            ================================================= */}
 
             <section className="telemetry-result-card">
 
@@ -997,7 +1576,9 @@ function IncidentDetails() {
             </section>
 
 
-            {/* ================= HINDSIGHT QUERY ================= */}
+            {/* =================================================
+                HINDSIGHT QUERY
+            ================================================= */}
 
             {analysis.hindsightQuery && (
 
@@ -1032,9 +1613,14 @@ function IncidentDetails() {
 }
 
 
-/* ================= TELEMETRY COMPONENT ================= */
+// =========================================================
+// TELEMETRY COMPONENT
+// =========================================================
 
-function Telemetry({ label, value }) {
+function Telemetry({
+  label,
+  value,
+}) {
   return (
     <div className="telemetry-item">
 
@@ -1049,5 +1635,6 @@ function Telemetry({ label, value }) {
     </div>
   );
 }
+
 
 export default IncidentDetails;
